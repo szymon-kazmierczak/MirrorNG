@@ -24,9 +24,14 @@ namespace Mirror.DragonsKcp
         private volatile uint _lastReceived;
         private UniTaskCompletionSource _connectedComplete;
 
+        /// <summary>
+        /// Space for CRC64
+        /// </summary>
+        private const int Reserved = sizeof(ulong);
+
         // If we don't receive anything these many milliseconds
         // then consider us disconnected
-        private const int Timeout = 3000;
+        private const int Timeout = 15000;
 
         #endregion
 
@@ -35,13 +40,16 @@ namespace Mirror.DragonsKcp
             SocketConnection = socket;
             _remoteEndpoint = endPoint;
 
-            _kcp = new Kcp(0, RawSend);
+            _kcp = new Kcp(0, SendWithChecksum);
             _kcp.SetNoDelay();
 
-            _ = KcpUpdate();
+            // reserve some space for CRC64
+            _kcp.ReserveBytes(Reserved);
+
+            KcpUpdate().Forget();
         }
 
-        internal async UniTask<bool> ConnectAsync(string host, ushort port)
+        internal async UniTask<IConnection> ConnectAsync(string host, ushort port)
         {
             IPAddress[] ipAddress = await Dns.GetHostAddressesAsync(host);
 
@@ -50,7 +58,7 @@ namespace Mirror.DragonsKcp
 
             _remoteEndpoint = new IPEndPoint(ipAddress[0], port);
 
-            _ = UniTask.RunOnThreadPool(Update, false, CancellationToken.Token);
+            UniTask.RunOnThreadPool(Update).Forget();
 
             SocketConnection = new Socket(_remoteEndpoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
             SocketConnection.Connect(_remoteEndpoint);
@@ -65,15 +73,30 @@ namespace Mirror.DragonsKcp
             while (await UniTask.WhenAny(connectedCompleteTask,
                 UniTask.Delay(TimeSpan.FromSeconds(Math.Max(1, Options.ClientConnectionTimeout)))) != 0)
             {
-                return false;
+                return null;
             }
 
-            return true;
+            return this;
         }
 
         private void RawSend(byte[] data, int length)
         {
-            SocketConnection.SendTo(data, length, SocketFlags.None, _remoteEndpoint);
+            SocketConnection?.SendTo(data, length, SocketFlags.None, _remoteEndpoint);
+        }
+
+        private void SendWithChecksum(byte[] data, int length)
+        {
+            // add a CRC64 checksum in the reserved space
+            ulong crc = Crc64.Compute(data, Reserved, length - Reserved);
+
+            Utils.Encode64U(data, 0, crc);
+
+            RawSend(data, length);
+
+            //if (_kcp.WaitSnd > 1000)
+            //{
+            //    Debug.LogWarningFormat("Too many packets waiting in the send queue {0}, you are sending too much data,  the transport can't keep up", _kcp.WaitSnd);
+            //}
         }
 
         #region Overrides of Common
@@ -113,11 +136,13 @@ namespace Mirror.DragonsKcp
         /// <summary>
         ///     Shutdown and disconnect
         /// </summary>
-        public override void Disconnect()
+        public override async void Disconnect()
         {
-            _ = SendAsync(new ArraySegment<byte>(new[] {(byte)InternalMessage.Disconnect}));
+            SocketConnection.Send(new[] {(byte)InternalMessage.Disconnect}, SocketFlags.None);
 
             _kcp.Flush(false);
+
+            await UniTask.Delay(1000);
 
             CancellationToken?.Cancel();
             SocketConnection?.Close();
@@ -138,7 +163,7 @@ namespace Mirror.DragonsKcp
         /// <summary>
         ///     Process kcp update checks.
         /// </summary>
-        private async UniTask KcpUpdate()
+        private async UniTaskVoid KcpUpdate()
         {
             while(!CancellationToken.IsCancellationRequested)
             {
@@ -162,58 +187,63 @@ namespace Mirror.DragonsKcp
         /// <summary>
         ///     Process raw and kcp socket updates.
         /// </summary>
-        protected override void Update()
+        protected override async UniTaskVoid Update()
         {
-            while (!CancellationToken.IsCancellationRequested)
+            try
             {
-                while (SocketConnection != null)
+                int msgLength = 0;
+
+                while (!CancellationToken.IsCancellationRequested)
                 {
-                    while (SocketConnection.Poll(0, SelectMode.SelectRead))
+                    while (SocketConnection != null && SocketConnection.Poll(0, SelectMode.SelectRead))
                     {
-                        int msgLength = SocketConnection.ReceiveFrom(ReceiveBuffer, ref _remoteEndpoint);
+                        msgLength = SocketConnection.ReceiveFrom(ReceiveBuffer, ref _remoteEndpoint);
 
                         ProcessIncomingInput(ReceiveBuffer, msgLength);
                     }
 
-                    UniTask.Delay(1);
+                    await UniTask.Delay(msgLength);
                 }
-
-                UniTask.Delay(1);
+            }
+            catch (SocketException)
+            {
+                // this is fine,  the socket might have been closed in the other end
             }
         }
 
         internal void ProcessIncomingInput(byte[] data, int msgLength)
         {
-            // If we don't get back a 0 we did not receive data or had errors.
-            _kcp.Input(data, 0, msgLength, true, false);
-
-            _lastReceived = _kcp.CurrentMS;
-
-            int msgSize = _kcp.PeekSize();
-
-            if (msgSize <= 0)
-            {
-                return;
-            }
-
-            _mirrorReceiveBuffer = new byte[msgSize];
-
-            _kcp.Receive(_mirrorReceiveBuffer, 0, _mirrorReceiveBuffer.Length);
-
-            switch (_mirrorReceiveBuffer.Length)
+            switch (msgLength)
             {
                 // Check to see if it was the accept message from server.
-                case 1 when _mirrorReceiveBuffer[0] != (byte)InternalMessage.AcceptConnection:
+                case 1 when data[0] == (byte)InternalMessage.Disconnect:
+                    Disconnect();
                     return;
-                case 1 when _mirrorReceiveBuffer[0] == (byte)InternalMessage.AcceptConnection:
-                    Debug.Log("Received Connection acceptance.");
+                case 1 when data[0] == (byte)InternalMessage.AcceptConnection:
 
                     _connectedComplete.TrySetResult();
 
                     return;
                 default:
+
+                    // If we don't get back a 0 we did not receive data or had errors.
+                    _kcp.Input(data, Reserved, msgLength, true, false);
+
+                    _lastReceived = _kcp.CurrentMS;
+
+                    int msgSize = _kcp.PeekSize();
+
+                    if (msgSize <= 0)
+                    {
+                        return;
+                    }
+
+                    _mirrorReceiveBuffer = new byte[msgSize];
+
+                    _kcp.Receive(_mirrorReceiveBuffer, 0, _mirrorReceiveBuffer.Length);
+
                     _receivedMessages.TryAdd(_mirrorReceiveBuffer);
-                    break;
+                    return;
             }
         }
 

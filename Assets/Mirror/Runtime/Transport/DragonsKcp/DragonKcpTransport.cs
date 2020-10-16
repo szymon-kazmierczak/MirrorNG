@@ -17,7 +17,7 @@ namespace Mirror.DragonsKcp
 
         private Server _server;
         private KcpConnection _client;
-        public long ReceivedMessageCount { get; private set; }
+        public static long ReceivedMessageCount { get; internal set; }
 
         #endregion
 
@@ -65,7 +65,7 @@ namespace Mirror.DragonsKcp
 
             ushort port = (ushort)(uri.IsDefaultPort ? Options.Port : uri.Port);
 
-            return await _client.ConnectAsync(uri.Host, port) ? _client : null;
+            return await _client.ConnectAsync(uri.Host, port);
         }
 
         /// <summary>

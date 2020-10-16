@@ -2,6 +2,7 @@
 
 using System.Net.Sockets;
 using System.Threading;
+using Cysharp.Threading.Tasks;
 
 #endregion
 
@@ -33,6 +34,6 @@ namespace Mirror.DragonsKcp
         /// <summary>
         ///     Process socket updates.
         /// </summary>
-        protected abstract void Update();
+        protected abstract UniTaskVoid Update();
     }
 }

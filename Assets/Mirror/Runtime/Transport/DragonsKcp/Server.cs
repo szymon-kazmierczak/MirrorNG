@@ -24,7 +24,7 @@ namespace Mirror.DragonsKcp
         {
             Debug.Log("Sever is spinning up.");
 
-            _ = UniTask.RunOnThreadPool(Update, false, CancellationToken.Token);
+            UniTask.RunOnThreadPool(Update).Forget();
         }
 
         public UniTask Listen()
@@ -63,10 +63,11 @@ namespace Mirror.DragonsKcp
                     // Send back to client we accepted request to connect.
                     byte[] acceptMessage = {(byte)InternalMessage.AcceptConnection};
 
-                    connection.SendAsync(new ArraySegment<byte>(acceptMessage));
+                    SocketConnection.SendTo(acceptMessage, endpoint);
                     return;
                 case 1 when data[0] == (byte)InternalMessage.Disconnect:
-                    ConnectedClients.Remove((IPEndPoint) endpoint);
+                    if (ConnectedClients.ContainsKey((IPEndPoint)endpoint))
+                        ConnectedClients.Remove((IPEndPoint)endpoint);
                     return;
                 default:
                     // Already connected let's process data.               
@@ -87,19 +88,23 @@ namespace Mirror.DragonsKcp
             SocketConnection = null;
         }
 
-        protected override void Update()
+        protected sealed override async UniTaskVoid Update()
         {
+            int msgLength = 0;
+
             while(!CancellationToken.IsCancellationRequested)
             {
                 while (SocketConnection != null && SocketConnection.Poll(0, SelectMode.SelectRead))
                 {
-                    int msgLength = SocketConnection.ReceiveFrom(ReceiveBuffer, 0, ReceiveBuffer.Length,
+                    msgLength = SocketConnection.ReceiveFrom(ReceiveBuffer, 0, ReceiveBuffer.Length,
                         SocketFlags.None, ref _newClientEp);
+
+                    DragonKcpTransport.ReceivedMessageCount++;
 
                     ProcessIncomingInput(_newClientEp, ReceiveBuffer, msgLength);
                 }
 
-                UniTask.Delay(1);
+                await UniTask.Delay(msgLength);
             }
         }
 
