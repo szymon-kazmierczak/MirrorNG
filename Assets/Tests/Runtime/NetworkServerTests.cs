@@ -160,6 +160,7 @@ namespace Mirror.Tests
             func1.Received(1).Invoke();
         });
 
+        [UnityTest]
         public IEnumerator ApplicationQuitTest() => UniTask.ToCoroutine(async () =>
         {
             UnityAction func1 = Substitute.For<UnityAction>();
