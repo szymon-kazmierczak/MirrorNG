@@ -203,6 +203,8 @@ namespace Mirror
         {
             logger.Log("NetworkSceneManager.OnServerAuthenticated");
 
+            conn.RegisterHandler<SceneReadyMessage>(ServerSceneReadyMessage);
+
             conn.Send(new SceneMessage { scenePath = NetworkScenePath, additiveScenes = additiveSceneList.ToArray() });
             conn.Send(new SceneReadyMessage());
         }
@@ -251,6 +253,18 @@ namespace Mirror
             server.SendToAll(new SceneReadyMessage());
 
             ServerSceneChanged.Invoke(scenePath, operation);
+        }
+
+        internal void ServerSceneReadyMessage(INetworkConnection conn, SceneReadyMessage msg)
+        {
+            NetworkConnection connection = conn as NetworkConnection;
+            foreach(string scene in connection.ActiveScenes.Keys)
+            {
+                if(scene.Equals(msg.scenePath))
+                {
+                    connection.ActiveScenes[scene] = true;
+                }
+            }
         }
 
         #endregion
